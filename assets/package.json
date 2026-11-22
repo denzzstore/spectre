@@ -1,0 +1,10 @@
+{
+  "name": "spectre-node",
+  "version": "1.0.0",
+  "private": true,
+  "main": "index.js",
+  "dependencies": {
+    "@whiskeysockets/baileys": "6.7.9",
+    "pino": "9.4.0"
+  }
+}
