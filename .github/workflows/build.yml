@@ -1,0 +1,119 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '7.6.3'
+
+      - name: Ambil nodejs-mobile
+        run: |
+          set -e
+          git clone --depth 1 https://github.com/JaneaSystems/nodejs-mobile.git /tmp/nm
+          cp -r /tmp/nm/android/nodejs-mobile ./nodejs-mobile
+          cd nodejs-mobile
+          # netralkan konfigurasi lama supaya cocok AGP 7.4.2
+          sed -i '/jcenter()/d' build.gradle || true
+          sed -i 's/compileSdkVersion .*/compileSdkVersion 33/' build.gradle || true
+          sed -i 's/buildToolsVersion .*/buildToolsVersion "33.0.2"/' build.gradle || true
+          sed -i 's/minSdkVersion .*/minSdkVersion 24/' build.gradle || true
+          if ! find . -name "libnode.so" | grep -q .; then
+            echo "::error::libnode.so tidak ditemukan pada modul nodejs-mobile"
+            exit 1
+          fi
+
+      - name: Bundle Baileys
+        run: |
+          set -e
+          mkdir -p app/src/main/assets/nodejs-project
+          cp assets/index.js app/src/main/assets/nodejs-project/index.js
+          cp assets/package.json app/src/main/assets/nodejs-project/package.json
+          cd app/src/main/assets/nodejs-project
+          npm install --no-audit --no-fund
+          npx --yes esbuild index.js --bundle --platform=node --target=node18 \
+            --format=cjs --outfile=main.js --external:nodejs-mobile
+          rm -rf node_modules index.js package.json package-lock.json
+
+      - name: Download font
+        run: |
+          set -e
+          mkdir -p app/src/main/res/font
+          curl -fsSL -o app/src/main/res/font/sora_variable.ttf \
+            "https://raw.githubusercontent.com/google/fonts/main/ofl/sora/Sora%5Bwght%5D.ttf"
+          curl -fsSL -o app/src/main/res/font/playfair_variable.ttf \
+            "https://raw.githubusercontent.com/google/fonts/main/ofl/playfairdisplay/PlayfairDisplay%5Bwght%5D.ttf"
+
+      - name: Generate launcher icon
+        run: |
+          set -e
+          SRC=$(ls assets/icon_master.* | head -n1)
+          gen() { # $1=size $2=out
+            convert "$SRC" -resize "$1x$1" -background "#07070A" -gravity center \
+              -extent "$1x$1" "$2"
+          }
+          gen_fg() {
+            S=$(( $1 * 100 / 108 ))
+            convert "$SRC" -resize "${S}x${S}" -background none -gravity center \
+              -extent "$1x$1" "$2"
+          }
+          for spec in "mdpi 48 108" "hdpi 72 162" "xhdpi 96 216" "xxhdpi 144 324" "xxxhdpi 192 432"; do
+            set -- $spec
+            D="app/src/main/res/mipmap-$1"
+            mkdir -p "$D"
+            gen "$2" "$D/ic_launcher.png"
+            gen "$2" "$D/ic_launcher_round.png"
+            gen_fg "$3" "$D/ic_launcher_fg.png"
+          done
+          mkdir -p app/src/main/res/mipmap-anydpi-v26
+          for n in ic_launcher ic_launcher_round; do
+            cat > "app/src/main/res/mipmap-anydpi-v26/$n.xml" <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@color/ic_launcher_bg" />
+              <foreground android:drawable="@mipmap/ic_launcher_fg" />
+          </adaptive-icon>
+          EOF
+          done
+
+      - name: Buat keystore
+        run: |
+          keytool -genkeypair -v -keystore spectre.keystore -alias spectre \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass spectrepass -keypass spectrepass \
+            -dname "CN=Spectre, OU=Private, O=Spectre, L=-, S=-, C=ID"
+
+      - name: Build
+        env:
+          KS_PATH: spectre.keystore
+          KS_PASS: spectrepass
+          KEY_ALIAS: spectre
+          KEY_PASS: spectrepass
+        run: gradle assembleRelease --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: spectre-apk
+          path: app/build/outputs/apk/release/*.apk
+          retention-days: 30
